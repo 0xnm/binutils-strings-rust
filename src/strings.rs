@@ -1,13 +1,11 @@
-#![allow(unused)]
-
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::path::Path;
-use object::{Object, ObjectSection, ReadRef, Section, SectionFlags};
+use object::{Object, ObjectSection, Section, SectionFlags};
 use atty::Stream;
-use std::io::{Write, Stdout, Seek, stdin, stdout, Read, BufReader, SeekFrom, Stdin, StdinLock};
+use std::io::{Write, stdin, stdout, Read, BufReader, StdinLock};
 use super::utils::*;
 
 macro_rules! write_or_panic {
@@ -89,13 +87,14 @@ const SEC_ALLOC: u64 = 0x1;
 const SEC_LOAD: u64 = 0x2;
 const SEC_HAS_CONTENTS: u64 = 0x100;
 
-const MAX_KEEP_BACK_SIZE: usize = 4;
+const MAX_KEEP_BACK_SIZE: usize = 1024;
 
 const DATA_FLAGS: u64 = SEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS;
 
 // region internal data structures
 
 trait DataSource {
+    fn read_unicode(&mut self) -> Option<Vec<u8>>;
     fn read_byte(&mut self) -> Option<u8>;
     fn read_symbol(&mut self, encoding: &EncodingKind) -> Option<(u32, u8)>;
     fn seek_back(&mut self, num_bytes: u8);
@@ -107,6 +106,18 @@ struct ByteArrayHolder<'a> {
 }
 
 impl DataSource for ByteArrayHolder<'_> {
+    fn read_unicode(&mut self) -> Option<Vec<u8>> {
+        if self.position >= self.inner.len() {
+            return None;
+        }
+
+        let until = min(self.position + 4, self.inner.len());
+        let read = &self.inner[self.position..until];
+        self.position = until;
+
+        return Some(read.to_vec());
+    }
+
     fn read_byte(&mut self) -> Option<u8> {
         return match self.read_symbol(&EncodingKind::Bit8) {
             Some(x) => Some(x.0 as u8),
@@ -115,7 +126,6 @@ impl DataSource for ByteArrayHolder<'_> {
     }
 
     fn read_symbol(&mut self, encoding: &EncodingKind) -> Option<(u32, u8)> {
-        let mut current = 0u8;
         let mut num_read = 0u8;
         let mut result = 0u32;
 
@@ -127,7 +137,7 @@ impl DataSource for ByteArrayHolder<'_> {
             if self.position + num_read as usize >= self.inner.len() {
                 break;
             }
-            current = self.inner[self.position + num_read as usize];
+            let current = self.inner[self.position + num_read as usize];
             result = (result << 8) | (current as u32 & 0xff);
             num_read += 1;
         }
@@ -185,6 +195,43 @@ impl<'a> Into<ReaderWithSeek<'a>> for BufReader<StdinLock<'a>> {
 }
 
 impl DataSource for ReaderWithSeek<'_> {
+    fn read_unicode(&mut self) -> Option<Vec<u8>> {
+        let mut vec = Vec::<u8>::new();
+
+        let mut buffer = [0u8; 4];
+        loop {
+            if self.back_pos > 0 {
+                vec.push(self.back_buf[self.back_buf.len() - self.back_pos]);
+                self.back_pos -= 1;
+                if vec.len() == 4 {
+                    break;
+                }
+            } else {
+                match self.inner.read(&mut buffer[..(4 - vec.len())]) {
+                    Ok(read) => {
+                        if read == 0 {
+                            return None;
+                        }
+                        for byte in &buffer[0..read] {
+                            vec.push(*byte);
+                            self.back_buf.push_back(*byte);
+                        }
+                    }
+                    Err(_) => {
+                        return None;
+                    }
+                };
+                break;
+            }
+        }
+
+        if self.back_buf.len() > MAX_KEEP_BACK_SIZE {
+            self.back_buf = self.back_buf.split_off(MAX_KEEP_BACK_SIZE / 2);
+        }
+
+        return Some(vec);
+    }
+
     fn read_byte(&mut self) -> Option<u8> {
         return match self.read_symbol(&EncodingKind::Bit8) {
             Some(x) => Some(x.0 as u8),
@@ -193,12 +240,12 @@ impl DataSource for ReaderWithSeek<'_> {
     }
 
     fn read_symbol(&mut self, encoding: &EncodingKind) -> Option<(u32, u8)> {
-        let mut current = 0u8;
         let mut num_read = 0u8;
         let mut result = 0u32;
 
         let mut buf = [0u8; 1];
         while num_read < encoding.num_bytes() {
+            let current: u8;
             if self.back_pos > 0 {
                 current = self.back_buf[self.back_buf.len() - self.back_pos];
                 self.back_pos -= 1;
@@ -211,15 +258,15 @@ impl DataSource for ReaderWithSeek<'_> {
                         break;
                     }
                 };
-                self.back_buf.push_back(current as u8);
-            }
-
-            while self.back_buf.len() > MAX_KEEP_BACK_SIZE {
-                self.back_buf.pop_front();
+                self.back_buf.push_back(current);
             }
 
             result = (result << 8) | (current as u32 & 0xff);
             num_read += 1;
+        }
+
+        if self.back_buf.len() > MAX_KEEP_BACK_SIZE {
+            self.back_buf = self.back_buf.split_off(MAX_KEEP_BACK_SIZE / 2);
         }
 
         if num_read == 0 {
@@ -374,9 +421,7 @@ fn print_strings(
     writer: &mut dyn Write,
 ) {
     if !matches!(options.unicode_display, UnicodeDisplayKind::Default) {
-        // TODO downcast? support buffer vs stream case?
-        //print_unicode_buffer(filename, address, data, options, writer);
-        print_unicode_stream(filename, address, data, options, writer);
+        print_unicode_buffer(filename, address, data, options, writer);
         return;
     }
 
@@ -390,7 +435,7 @@ fn print_strings(
     // * Print sequence start address
     // * Print sequence content and continue to scan until wrong char found.
     loop {
-        let mut current_address = search_start_address;
+        let mut current_address: u64;
 
         if let Some(address) = find_matching_ascii_sequence(
             search_start_address, data, &mut buffer, options,
@@ -447,7 +492,6 @@ fn find_matching_ascii_sequence(
 ) -> Option<u64> {
     let mut search_start_address = start_address;
     let mut current_address = start_address;
-    let mut symbol = 0u32;
 
     /* See if the next `string_min' chars are all graphic chars.  */
     let mut should_retry = true;
@@ -463,11 +507,10 @@ fn find_matching_ascii_sequence(
         let mut i = 0u16;
         while i < options.min_length {
             let (character, read) = data.read_symbol(&options.encoding)?;
-            symbol = character;
             current_address += read as u64;
 
-            if symbol > 255 || !char_is_printable(symbol as u8 as char, options.encoding,
-                                                  options.include_all_whitespace) {
+            if character > 255 || !char_is_printable(character as u8 as char, options.encoding,
+                                                     options.include_all_whitespace) {
                 /* Found a non-graphic.  Try again starting with next byte.  */
                 search_start_address =
                     current_address - (options.encoding.num_bytes() as u64 - 1);
@@ -477,146 +520,13 @@ fn find_matching_ascii_sequence(
             }
 
             // TODO wrong cast, symbol can be up to 4 bytes
-            buffer.push(symbol as u8);
+            buffer.push(character as u8);
 
             i += 1;
         }
     }
 
     return Some(current_address - buffer.len() as u64);
-}
-
-fn print_unicode_buffer(
-    filename: &str,
-    address: u64,
-    buffer: &[u8],
-    options: &Options,
-    writer: &mut dyn Write,
-) {
-    if !matches!(options.encoding, EncodingKind::Bit8) {
-        eprintln!("ICE: bad arguments to print_unicode_buffer");
-        return;
-    }
-
-    let mut current_buffer = buffer;
-    let mut current_address = address;
-
-    loop {
-        if current_buffer.len() == 0 {
-            return;
-        }
-
-        /* We must only display strings that are at least string_min *characters*
-       long.  So we scan the buffer in two stages.  First we locate the start
-       of a potential string.  Then we walk along it until we have found
-       string_min characters.  Then we go back to the start point and start
-       displaying characters according to the unicode_display setting.  */
-
-        let mut sequence_start_address_offset = 0usize;
-        let mut address_offset = 0usize;
-        let mut char_len = 1u8;
-        let mut num_found = 0u16;
-
-        loop {
-            if address_offset == current_buffer.len() {
-                break;
-            }
-
-            let c = current_buffer[address_offset];
-
-            char_len = 1;
-
-            /* Find the first potential character of a string.  */
-            if !char_is_printable(c as char, options.encoding, options.include_all_whitespace) {
-                num_found = 0;
-                address_offset += char_len as usize;
-                continue;
-            }
-
-            if c > 126 {
-                if c < 0xc0 {
-                    num_found = 0;
-                    address_offset += char_len as usize;
-                    continue;
-                }
-
-                char_len = is_valid_utf8(&current_buffer[address_offset..]);
-                if char_len == 0 {
-                    char_len = 1;
-                    num_found = 0;
-                    address_offset += 1;
-                    continue;
-                }
-
-                if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                    /* We have found a valid UTF-8 character, but we treat it as non-graphic.  */
-                    num_found = 0;
-                    address_offset += char_len as usize;
-                    continue;
-                }
-            }
-
-            if num_found == 0 {
-                /* We have found a potential starting point for a string.  */
-                sequence_start_address_offset = address_offset;
-            }
-
-            num_found += 1;
-
-            if num_found >= options.min_length {
-                break;
-            }
-
-            address_offset += char_len as usize;
-        }
-
-        if num_found < options.min_length {
-            return;
-        }
-
-        print_filename_and_address(
-            filename,
-            current_address + sequence_start_address_offset as u64,
-            options,
-            writer,
-        );
-
-        /* We have found string_min characters.  Display them and any
-       more that follow.  */
-        let mut offset = sequence_start_address_offset;
-        while offset < current_buffer.len() {
-            let c = current_buffer[offset];
-
-            char_len = 1;
-
-            if !char_is_printable(c as char, options.encoding, options.include_all_whitespace) {
-                break;
-            } else if c < 127 {
-                write_or_panic!(writer, "{}", c as char);
-            } else if is_valid_utf8(&current_buffer[offset..]) == 0 {
-                break;
-            } else if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                break;
-            } else {
-                // TODO max slice length?
-                char_len = display_utf8_char(
-                    &current_buffer[offset..offset + 4],
-                    options.unicode_display,
-                    writer,
-                );
-            }
-            offset += char_len as usize;
-        }
-
-        if let Some(separator) = &options.output_separator {
-            write_or_panic!(writer, "{}", separator.as_str());
-        } else {
-            write_or_panic!(writer, "\n");
-        }
-
-        current_address += offset as u64;
-        current_buffer = &current_buffer[offset..];
-    }
 }
 
 /*
@@ -628,7 +538,7 @@ U+0080 	            U+07FF 	            110xxxxx 	10xxxxxx
 U+0800 	            U+FFFF 	            1110xxxx 	10xxxxxx 	10xxxxxx
 U+10000             U+10FFFF 	        11110xxx 	10xxxxxx 	10xxxxxx 	10xxxxxx
  */
-fn print_unicode_stream(
+fn print_unicode_buffer(
     filename: &str,
     address: u64,
     data: &mut dyn DataSource,
@@ -636,291 +546,157 @@ fn print_unicode_stream(
     writer: &mut dyn Write,
 ) {
     if !matches!(options.encoding, EncodingKind::Bit8) {
-        eprintln!("ICE: bad arguments to print_unicode_stream");
+        eprintln!("ICE: bad arguments to print_unicode_buffer");
         return;
     }
 
-    /* It would be nice if we could just read the stream into a buffer
-         and then process if with print_unicode_buffer.  But the input
-         might be huge or it might time-locked (eg stdin).  So instead
-         we go one byte at a time...  */
-    // TODO rewrite this big chunk of code
+    let mut current_address = address;
+
     loop {
-        let mut start_point = 0usize;
-        let mut num_read = 0u16;
-        // number of unicode chars
-        let mut num_chars = 0u16;
-        // number of bytes
-        let mut num_print = 0u16;
-        let mut c = 0u8;
-        let mut print_buf = vec![0u8; (options.min_length * 4) as usize];
 
-        /* Find a series of string_min characters.  Put them into print_buf.  */
+        let sequence_start_address_offset = match find_matching_unicode_sequence(
+            data, options
+        ) {
+            Some(offset) => offset,
+            None => return
+        };
+
+        print_filename_and_address(
+            filename,
+            current_address + sequence_start_address_offset as u64,
+            options,
+            writer,
+        );
+
+        /* We have found string_min characters.  Display them and any
+       more that follow.  */
+        let mut offset = sequence_start_address_offset;
         loop {
-            if num_chars >= options.min_length {
-                break;
-            }
-
-            c = match data.read_byte() {
-                Some(value) => {
-                    value
-                }
+            let c = match data.read_byte() {
+                Some(x) => x,
                 None => return
             };
-            num_read += 1;
+
+            let mut char_len = 1;
 
             if !char_is_printable(c as char, options.encoding, options.include_all_whitespace) {
-                num_chars = 0;
-                num_print = 0;
-                continue;
-            }
-
-            if num_chars == 0 {
-                start_point = num_read as usize - 1;
-            }
-
-            if c < 127 {
-                print_buf[num_print as usize] = c;
-                num_chars += 1;
-                num_print += 1;
-                continue;
-            }
-
-            if c < 0xc0 {
-                num_chars = 0;
-                num_print = 0;
-                continue;
-            }
-
-            /* We *might* have a UTF-8 sequence.  Time to start peeking.  */
-            let mut utf8 = [0u8; 4];
-
-            utf8[0] = c;
-            c = match data.read_byte() {
-                Some(value) => {
-                    value
-                }
-                None => return
-            };
-            num_read += 1;
-            utf8[1] = c;
-
-            if (utf8[1] & 0xc0) != 0x80 {
-                /* Invalid UTF-8.  */
                 data.seek_back(1);
-                num_chars = 0;
-                num_print = 0;
-                continue;
-            } else if (utf8[0] & 0x20) == 0 {
-                /* A valid 2-byte UTF-8 encoding.  */
-                if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                    data.seek_back(1);
-                    num_chars = 0;
-                    num_print = 0;
-                } else {
-                    print_buf[num_print as usize] = utf8[0];
-                    num_print += 1;
-                    print_buf[num_print as usize] = utf8[1];
-                    num_print += 1;
-                    num_chars += 1;
-                }
-                continue;
-            }
-
-            c = match data.read_byte() {
-                Some(value) => {
-                    value
-                }
-                None => return
-            };
-            num_read += 1;
-            utf8[2] = c;
-
-            if (utf8[2] & 0xc0) != 0x80 {
-                /* Invalid UTF-8.  */
-                data.seek_back(2);
-                num_chars = 0;
-                num_print = 0;
-                continue;
-            } else if (utf8[0] & 0x10) == 0 {
-                /* A valid 3-byte UTF-8 encoding.  */
-                if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                    data.seek_back(2);
-                    num_chars = 0;
-                    num_print = 0;
-                } else {
-                    print_buf[num_print as usize] = utf8[0];
-                    num_print += 1;
-                    print_buf[num_print as usize] = utf8[1];
-                    num_print += 1;
-                    print_buf[num_print as usize] = utf8[2];
-                    num_print += 1;
-                    num_chars += 1;
-                }
-                continue;
-            }
-
-            c = match data.read_byte() {
-                Some(value) => {
-                    value
-                }
-                None => return
-            };
-            num_read += 1;
-            utf8[3] = c;
-
-            if (utf8[3] & 0xc0) != 0x80 {
-                /* Invalid UTF-8.  */
-                data.seek_back(3);
-                num_chars = 0;
-                num_print = 0;
-            } else if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                /* We have a valid 4-byte UTF-8 encoding.  */
-                data.seek_back(3);
-                num_chars = 0;
-                num_print = 0;
+                break;
+            } else if c < 127 {
+                write_or_panic!(writer, "{}", c as char);
             } else {
-                print_buf[num_print as usize] = utf8[0];
-                num_print += 1;
-                print_buf[num_print as usize] = utf8[1];
-                num_print += 1;
-                print_buf[num_print as usize] = utf8[2];
-                num_print += 1;
-                print_buf[num_print as usize] = utf8[3];
-                num_print += 1;
-                num_chars += 1;
-            }
-        }
-
-        if num_chars >= options.min_length {
-            /* We know that we have string_min valid characters in print_buf,
-         and there may be more to come in the stream.  Start displaying
-         them.  */
-
-            print_filename_and_address(filename, address + start_point as u64, options, writer);
-
-            let mut i = 0usize;
-            loop {
-                if i >= num_print as usize {
-                    break;
-                }
-                if print_buf[i] < 127 {
-                    write_or_panic!(writer, "{}", print_buf[i] as char);
-                    i += 1;
-                } else {
-                    i += display_utf8_char(
-                        &print_buf[i..i + 4],
-                        options.unicode_display,
-                        writer,
-                    ) as usize;
-                }
-            }
-
-            /* OK so now we have to start read unchecked bytes.  */
-            loop {
-                c = match data.read_byte() {
-                    Some(value) => {
-                        value
-                    }
+                data.seek_back(1);
+                let maybe_utf8 = match data.read_unicode() {
+                    Some(x) => x,
                     None => return
                 };
-                num_read += 1;
-
-                if !char_is_printable(c as char, options.encoding, options.include_all_whitespace) {
-                    break;
-                }
-
-                if c < 127 {
-                    write_or_panic!(writer, "{}", c as char);
-                    continue;
-                }
-
-                if c < 0xc0 {
-                    break;
-                }
-
-                /* We *might* have a UTF-8 sequence.  Time to start peeking.  */
-                let mut utf8 = [0u8; 4];
-
-                utf8[0] = c;
-                c = match data.read_byte() {
-                    Some(value) => {
-                        value
-                    }
-                    None => return
-                };
-                num_read += 1;
-                utf8[1] = c;
-
-                if (utf8[1] & 0xc0) != 0x80 {
-                    /* Invalid UTF-8.  */
-                    data.seek_back(1);
-                    break;
-                } else if (utf8[0] & 0x20) == 0 {
-                    /* Valid 2-byte UTF-8.  */
-                    if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                        data.seek_back(1);
-                        break;
-                    } else {
-                        display_utf8_char(&utf8, options.unicode_display, writer);
-                        continue;
-                    }
-                }
-
-                c = match data.read_byte() {
-                    Some(value) => {
-                        value
-                    }
-                    None => return
-                };
-                num_read += 1;
-                utf8[2] = c;
-
-                if (utf8[2] & 0xc0) != 0x80 {
-                    /* Invalid UTF-8.  */
-                    data.seek_back(1);
-                    break;
-                } else if (utf8[0] & 0x10) == 0 {
-                    /* Valid 3-byte UTF-8.  */
-                    if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                        data.seek_back(1);
-                        break;
-                    } else {
-                        display_utf8_char(&utf8, options.unicode_display, writer);
-                        continue;
-                    }
-                }
-
-                c = match data.read_byte() {
-                    Some(value) => {
-                        value
-                    }
-                    None => return
-                };
-                num_read += 1;
-                utf8[3] = c;
-
-                if (utf8[3] & 0xc0) != 0x80 {
-                    /* Invalid UTF-8.  */
-                    data.seek_back(3);
+                if is_valid_utf8(&maybe_utf8) == 0 {
+                    data.seek_back(maybe_utf8.len() as u8);
                     break;
                 } else if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
-                    data.seek_back(3);
+                    data.seek_back(maybe_utf8.len() as u8);
                     break;
                 } else {
-                    /* A valid 4-byte UTF-8 encoding.  */
-                    display_utf8_char(&utf8, options.unicode_display, writer);
+                    char_len = display_utf8_char(
+                        &maybe_utf8,
+                        options.unicode_display,
+                        writer,
+                    );
+                    if char_len != maybe_utf8.len() as u8 {
+                        data.seek_back(maybe_utf8.len() as u8 - char_len);
+                    }
                 }
             }
+            offset += char_len as usize;
+        }
 
-            if let Some(separator) = &options.output_separator {
-                write_or_panic!(writer, "{}", separator.as_str());
-            } else {
-                write_or_panic!(writer, "\n");
+        if let Some(separator) = &options.output_separator {
+            write_or_panic!(writer, "{}", separator.as_str());
+        } else {
+            write_or_panic!(writer, "\n");
+        }
+
+        current_address += offset as u64;
+    }
+}
+
+fn find_matching_unicode_sequence(
+    data: &mut dyn DataSource,
+    options: &Options,
+) -> Option<usize> {
+    /* We must only display strings that are at least string_min *characters*
+   long.  So we scan the buffer in two stages.  First we locate the start
+   of a potential string.  Then we walk along it until we have found
+   string_min characters.  Then we go back to the start point and start
+   displaying characters according to the unicode_display setting.  */
+
+    let mut sequence_start_address_offset = 0usize;
+    let mut address_offset = 0usize;
+    let mut num_found = 0u16;
+
+    loop {
+        let c = data.read_byte()?;
+
+        let mut char_len = 1;
+
+        /* Find the first potential character of a string.  */
+        if !char_is_printable(c as char, options.encoding, options.include_all_whitespace) {
+            num_found = 0;
+            address_offset += 1 as usize;
+            continue;
+        }
+
+        if c > 126 {
+            if c < 0xc0 {
+                num_found = 0;
+                address_offset += 1 as usize;
+                continue;
             }
 
-            start_point += num_read as usize;
+            data.seek_back(1);
+
+            let maybe_utf8 = data.read_unicode()?;
+
+            char_len = is_valid_utf8(&maybe_utf8);
+            if char_len == 0 {
+                num_found = 0;
+                address_offset += 1;
+                data.seek_back(maybe_utf8.len() as u8 - 1);
+                continue;
+            }
+
+            if matches!(options.unicode_display, UnicodeDisplayKind::Invalid) {
+                /* We have found a valid UTF-8 character, but we treat it as non-graphic.  */
+                num_found = 0;
+                data.seek_back(maybe_utf8.len() as u8 - 1);
+                address_offset += char_len as usize;
+                continue;
+            }
+
+            if char_len as usize != maybe_utf8.len() && num_found < options.min_length - 1 {
+                data.seek_back(maybe_utf8.len() as u8 - char_len)
+            }
         }
+
+        if num_found == 0 {
+            /* We have found a potential starting point for a string.  */
+            sequence_start_address_offset = address_offset;
+        }
+
+        num_found += 1;
+
+        if num_found >= options.min_length {
+            if char_len == 1 {
+                data.seek_back(address_offset as u8 + char_len - sequence_start_address_offset as u8);
+            } else {
+                // TODO fix that. We need to go back taking into account last read, and we
+                // don't know if it was unicode or not
+                data.seek_back(address_offset as u8 + 4 - sequence_start_address_offset as u8);
+            }
+            return Some(sequence_start_address_offset);
+        }
+
+        address_offset += char_len as usize;
     }
 }
 
@@ -1209,6 +985,27 @@ mod tests {
     }
 
     #[test]
+    fn test_print_strings_with_unicode_escape_and_address_hex() {
+        let mut data: ReaderWithSeek = BufReader::new(
+            File::open(TEST_OBJECT_FILE_PATH).unwrap()
+        ).into();
+        let mut output = Vec::<u8>::new();
+
+        let expected = String::from_utf8(
+            std::fs::read("test-resources/output-with-unicode-escape-address-hex.txt").unwrap()
+        ).unwrap();
+
+        let mut options = Options::default();
+        options.unicode_display = UnicodeDisplayKind::Escape;
+        options.encoding = EncodingKind::Bit8;
+        options.print_addresses = true;
+        options.address_radix = RadixKind::Hex;
+
+        print_strings(TEST_OBJECT_FILE_PATH, 0, &mut data, &options, &mut output);
+        assert_eq!(expected, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
     fn test_data_source_backed_by_array() {
         let buffer = [0x12u8, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78, 0x89, 0xFF, 0xAA];
 
@@ -1279,5 +1076,112 @@ mod tests {
         assert_eq!(1, read);
 
         assert_eq!(None, source.read_byte());
+    }
+
+    #[test]
+    fn test_data_source_backed_by_reader_with_seek_unicode() {
+        let buffer = [0x12u8, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78, 0x89, 0xFF, 0xAA];
+
+        let mut source = ReaderWithSeek {
+            inner: Box::new(&buffer[..]),
+            back_buf: VecDeque::with_capacity(MAX_KEEP_BACK_SIZE),
+            back_pos: 0,
+        };
+
+        assert_eq!(0x12, source.read_byte().unwrap());
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x23, vec[0]);
+        assert_eq!(0x34, vec[1]);
+        assert_eq!(0x45, vec[2]);
+        assert_eq!(0x56, vec[3]);
+
+        source.seek_back(3);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x34, vec[0]);
+        assert_eq!(0x45, vec[1]);
+        assert_eq!(0x56, vec[2]);
+        assert_eq!(0x67, vec[3]);
+
+        source.seek_back(5);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x23, vec[0]);
+        assert_eq!(0x34, vec[1]);
+        assert_eq!(0x45, vec[2]);
+        assert_eq!(0x56, vec[3]);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x67, vec[0]);
+        assert_eq!(0x78, vec[1]);
+        assert_eq!(0x89, vec[2]);
+        assert_eq!(0xFF, vec[3]);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(1, vec.len());
+        assert_eq!(0xAA, vec[0]);
+    }
+
+    #[test]
+    fn test_data_source_backed_by_array_unicode() {
+        let buffer = [0x12u8, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78, 0x89, 0xFF, 0xAA];
+
+        let mut source = ByteArrayHolder {
+            inner: &buffer,
+            position: 0,
+        };
+
+        assert_eq!(0x12, source.read_byte().unwrap());
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x23, vec[0]);
+        assert_eq!(0x34, vec[1]);
+        assert_eq!(0x45, vec[2]);
+        assert_eq!(0x56, vec[3]);
+
+        source.seek_back(3);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x34, vec[0]);
+        assert_eq!(0x45, vec[1]);
+        assert_eq!(0x56, vec[2]);
+        assert_eq!(0x67, vec[3]);
+
+        source.seek_back(5);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x23, vec[0]);
+        assert_eq!(0x34, vec[1]);
+        assert_eq!(0x45, vec[2]);
+        assert_eq!(0x56, vec[3]);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(4, vec.len());
+        assert_eq!(0x67, vec[0]);
+        assert_eq!(0x78, vec[1]);
+        assert_eq!(0x89, vec[2]);
+        assert_eq!(0xFF, vec[3]);
+
+        let vec = source.read_unicode().unwrap();
+
+        assert_eq!(1, vec.len());
+        assert_eq!(0xAA, vec[0]);
     }
 }
