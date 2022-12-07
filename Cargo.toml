@@ -15,5 +15,5 @@ features = ["std", "derive"]
 atty = "0.2"
 
 [dependencies.object]
-version = "0.28.3"
+version = "0.30.0"
 features = ["read"]

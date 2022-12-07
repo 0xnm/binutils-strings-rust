@@ -33,37 +33,37 @@ Only `all+ASCII` performance comparison brings a meaningful result, because the 
 
 | Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
 |:---|---:|---:|---:|---:|
-| `target/release/strings target/debug/strings` | 818.1 ± 70.1 | 751.8 | 952.2 | 1.09 ± 0.11 |
-| `strings target/debug/strings` | 748.9 ± 34.2 | 723.7 | 839.7 | 1.00 |
+| `target/release/strings target/debug/strings` | 864.2 ± 57.0 | 797.0 | 986.9 | 1.04 ± 0.08 |
+| `strings target/debug/strings` | 831.4 ± 26.2 | 804.1 | 888.2 | 1.00 |
 
 #### Rust variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 2468
-	Voluntary context switches: 2903
-	Involuntary context switches: 3
+	Maximum resident set size (kbytes): 2448
+	Voluntary context switches: 2924
+	Involuntary context switches: 6
 
 #### C variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 2532
-	Voluntary context switches: 5305
+	Maximum resident set size (kbytes): 2572
+	Voluntary context switches: 5347
 	Involuntary context switches: 4
 
 ### ASCII chars search, only data section(s) scan (in-memory byte array mode)
 
 | Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
 |:---|---:|---:|---:|---:|
-| `target/release/strings -d target/debug/strings` | 167.4 ± 19.8 | 151.9 | 236.1 | 3.65 ± 0.46 |
-| `strings -d target/debug/strings` | 45.8 ± 2.0 | 41.8 | 56.5 | 1.00 |
+| `target/release/strings -d target/debug/strings` | 161.5 ± 4.0 | 154.4 | 168.5 | 3.42 ± 0.21 |
+| `strings -d target/debug/strings` | 47.3 ± 2.6 | 42.6 | 55.0 | 1.00 |
 
 #### Rust variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 23456
-	Voluntary context switches: 597
-	Involuntary context switches: 0
+	Maximum resident set size (kbytes): 23592
+	Voluntary context switches: 599
+	Involuntary context switches: 1
 
 #### C variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 4844
+	Maximum resident set size (kbytes): 4832
 	Voluntary context switches: 113
 	Involuntary context switches: 0
 
@@ -71,18 +71,18 @@ Only `all+ASCII` performance comparison brings a meaningful result, because the 
 
 | Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
 |:---|---:|---:|---:|---:|
-| `target/release/strings -u escape target/release/strings` | 243.1 ± 13.7 | 225.3 | 264.7 | 1.23 ± 0.13 |
-| `strings -Ue target/release/strings` | 197.2 ± 18.1 | 169.6 | 233.2 | 1.00 |
+| `target/release/strings -u escape target/release/strings` | 260.3 ± 18.0 | 233.0 | 302.5 | 1.40 ± 0.12 |
+| `strings -Ue target/release/strings` | 185.3 ± 9.8 | 175.8 | 208.7 | 1.00 |
 
 #### Rust variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 2472
-	Voluntary context switches: 2903
-	Involuntary context switches: 4
+	Maximum resident set size (kbytes): 2460
+	Voluntary context switches: 830
+	Involuntary context switches: 1
 
 #### C variant memory usage and context switches
 
-	Average total size (kbytes): 0
-	Minor (reclaiming a frame) page faults: 2187
-	Voluntary context switches: 789
+	Maximum resident set size (kbytes): 7784
+	Voluntary context switches: 1196
+	Involuntary context switches: 0
 

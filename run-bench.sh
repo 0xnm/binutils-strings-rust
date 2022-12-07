@@ -27,8 +27,8 @@ TIME_OUTPUT_GDB_FILE_MODE=$(${TIME_RUN_COMMAND} strings target/debug/strings 2>&
 TIME_OUTPUT_RUST_DATA_MODE=$(${TIME_RUN_COMMAND} target/release/strings -d target/debug/strings 2>&1 >/dev/null | ${EXTRACT_STATS_COMMAND})
 TIME_OUTPUT_GDB_DATA_MODE=$(${TIME_RUN_COMMAND} strings -d target/debug/strings 2>&1 >/dev/null | ${EXTRACT_STATS_COMMAND})
 
-TIME_OUTPUT_RUST_UNICODE_FILE_MODE=$(${TIME_RUN_COMMAND} target/release/strings -u escape target/debug/strings 2>&1 >/dev/null | ${EXTRACT_STATS_COMMAND})
-TIME_OUTPUT_GDB_UNICODE_FILE_MODE=$(${TIME_RUN_COMMAND} strings -Ue target/debug/strings 2>&1 >/dev/null | ${EXTRACT_STATS_COMMAND})
+TIME_OUTPUT_RUST_UNICODE_FILE_MODE=$(${TIME_RUN_COMMAND} target/release/strings -u escape target/release/strings 2>&1 >/dev/null | ${EXTRACT_STATS_COMMAND})
+TIME_OUTPUT_GDB_UNICODE_FILE_MODE=$(${TIME_RUN_COMMAND} strings -Ue target/release/strings 2>&1 >/dev/null | ${EXTRACT_STATS_COMMAND})
 
 # Generate README
 echo -en '## Performance comparison\n\n' > benchmarks.md
