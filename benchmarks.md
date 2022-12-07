@@ -1,61 +1,61 @@
 ## Performance comparison
 
-`strings` version 2.34
+`strings` version 2.38
 
 ### ASCII chars search, complete file scan (file stream mode)
 
 | Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
 |:---|---:|---:|---:|---:|
-| `target/release/strings target/debug/strings` | 737.4 ± 34.2 | 685.9 | 795.9 | 1.05 ± 0.06 |
-| `strings target/debug/strings` | 704.9 ± 28.6 | 682.2 | 777.5 | 1.00 |
+| `target/release/strings target/debug/strings` | 818.1 ± 70.1 | 751.8 | 952.2 | 1.09 ± 0.11 |
+| `strings target/debug/strings` | 748.9 ± 34.2 | 723.7 | 839.7 | 1.00 |
 
 #### Rust variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 2460
-	Voluntary context switches: 2624
-	Involuntary context switches: 4
+	Maximum resident set size (kbytes): 2468
+	Voluntary context switches: 2903
+	Involuntary context switches: 3
 
 #### C variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 2972
-	Voluntary context switches: 4715
-	Involuntary context switches: 3
+	Maximum resident set size (kbytes): 2532
+	Voluntary context switches: 5305
+	Involuntary context switches: 4
 
 ### ASCII chars search, only data section(s) scan (in-memory byte array mode)
 
 | Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
 |:---|---:|---:|---:|---:|
-| `target/release/strings -d target/debug/strings` | 146.4 ± 5.8 | 137.3 | 160.7 | 2.27 ± 0.22 |
-| `strings -d target/debug/strings` | 64.4 ± 5.7 | 57.6 | 85.4 | 1.00 |
+| `target/release/strings -d target/debug/strings` | 167.4 ± 19.8 | 151.9 | 236.1 | 3.65 ± 0.46 |
+| `strings -d target/debug/strings` | 45.8 ± 2.0 | 41.8 | 56.5 | 1.00 |
 
 #### Rust variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 21256
-	Voluntary context switches: 573
+	Maximum resident set size (kbytes): 23456
+	Voluntary context switches: 597
 	Involuntary context switches: 0
 
 #### C variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 4788
-	Voluntary context switches: 186
+	Maximum resident set size (kbytes): 4844
+	Voluntary context switches: 113
 	Involuntary context switches: 0
 
 ### Unicode chars search, complete file scan (file stream mode)
 
 | Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
 |:---|---:|---:|---:|---:|
-| `target/release/strings -u escape target/release/strings` | 273.9 ± 12.6 | 248.0 | 291.2 | 1.80 ± 0.09 |
-| `~/binutils-gdb/binutils/strings -Ue target/release/strings` | 152.4 ± 3.3 | 148.0 | 159.6 | 1.00 |
+| `target/release/strings -u escape target/release/strings` | 243.1 ± 13.7 | 225.3 | 264.7 | 1.23 ± 0.13 |
+| `strings -Ue target/release/strings` | 197.2 ± 18.1 | 169.6 | 233.2 | 1.00 |
 
 #### Rust variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 2460
-	Voluntary context switches: 804
-	Involuntary context switches: 1
+	Maximum resident set size (kbytes): 2472
+	Voluntary context switches: 2903
+	Involuntary context switches: 4
 
 #### C variant memory usage and context switches
 
-	Maximum resident set size (kbytes): 6728
-	Voluntary context switches: 1112
-	Involuntary context switches: 1
+	Average total size (kbytes): 0
+	Minor (reclaiming a frame) page faults: 2187
+	Voluntary context switches: 789
 
