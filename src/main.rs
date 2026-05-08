@@ -1,9 +1,9 @@
 mod strings;
 mod utils;
 
-use std::ffi::{OsString};
-use clap::{Parser};
-use strings::{Options, UnicodeDisplayKind, EncodingKind, RadixKind};
+use clap::Parser;
+use std::ffi::OsString;
+use strings::{EncodingKind, Options, RadixKind, UnicodeDisplayKind};
 
 impl Options {
     fn new(args: &CliArgs) -> Options {
@@ -39,30 +39,21 @@ impl Options {
             address_radix = RadixKind::Oct;
         }
 
-        if let Some(radix) = args.radix.as_deref() {
+        if let Some(radix) = args.radix {
             print_addresses = true;
-            match radix {
-                "o" => { address_radix = RadixKind::Oct; }
-                "d" => { address_radix = RadixKind::Dec; }
-                "x" => { address_radix = RadixKind::Hex; }
-                wrong => {
-                    panic!("Wrong value of radix argument: {}", wrong)
-                }
-            }
+            address_radix = radix
         }
 
-        if let Some(enc) = args.encoding.as_deref() {
-            encoding = EncodingKind::from(enc.parse().expect(
-                &format!("invalid char argument {}", enc)
-            ))
+        if let Some(enc) = args.encoding {
+            encoding = enc;
         }
 
         if let Some(separator) = args.output_separator.as_deref() {
             output_separator = Some(separator.to_string())
         }
 
-        if let Some(unicode) = args.unicode.as_deref() {
-            unicode_display = UnicodeDisplayKind::from(unicode);
+        if let Some(unicode) = args.unicode {
+            unicode_display = unicode;
         }
 
         if !matches!(unicode_display, UnicodeDisplayKind::Default) {
@@ -83,42 +74,9 @@ impl Options {
     }
 }
 
-impl UnicodeDisplayKind {
-    fn from(kind: &str) -> UnicodeDisplayKind {
-        return match kind {
-            "default" | "d" => UnicodeDisplayKind::Default,
-            "locale" | "l" => UnicodeDisplayKind::Show,
-            "escape" | "e" => UnicodeDisplayKind::Escape,
-            "invalid" | "i" => UnicodeDisplayKind::Invalid,
-            "hex" | "x" => UnicodeDisplayKind::Hex,
-            "highlight" | "h" => UnicodeDisplayKind::Highlight,
-            wrong => {
-                panic!("invalid argument to -u/--unicode: {}", wrong);
-            }
-        };
-    }
-}
-
-impl EncodingKind {
-    fn from(kind: char) -> EncodingKind {
-        return match kind {
-            's' => EncodingKind::Bit7,
-            'S' => EncodingKind::Bit8,
-            'b' => EncodingKind::BigEndian16,
-            'l' => EncodingKind::LittleEndian16,
-            'B' => EncodingKind::BigEndian32,
-            'L' => EncodingKind::LittleEndian32,
-            wrong => {
-                panic!("invalid argument to -e/--encoding: {}", wrong);
-            }
-        };
-    }
-}
-
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct CliArgs {
-
     /// Sets the input file(s) to scan (stdin by default)
     #[clap()]
     files: Vec<OsString>,
@@ -137,28 +95,28 @@ struct CliArgs {
 
     /// Print graphic char sequences, MIN-LEN or more bytes long, that are followed by a NUL or
     /// a newline.  Default is 4.
-    #[clap(short = 'n', long="bytes", default_value = "4")]
+    #[clap(short = 'n', long = "bytes", default_value = "4")]
     min_bytes: u16,
 
     /// Print the offset within the file before each string, in octal/hex/decimal.
     /// Values are {o,x,d}.
     #[clap(short = 't', long)]
-    radix: Option<String>,
+    radix: Option<RadixKind>,
 
     /// Like -to. (Some other implementations have -o like -to, others like -td.
     /// We chose one arbitrarily.)
     #[clap(short = 'o')]
     octal_radix: bool,
 
-    /// By default tab and space are the only whitespace included in graphic char sequences.
+    /// By default, tab and space are the only whitespace included in graphic char sequences.
     /// This option considers all of isspace() valid.
-    #[clap(short = 'w', long="include-all-whitespace")]
+    #[clap(short = 'w', long = "include-all-whitespace")]
     include_all_whitespace: bool,
 
     /// Select character encoding: 7-bit-character, 8-bit-character, bigendian 16-bit,
     /// littleendian 16-bit, bigendian 32-bit,  littleendian 32-bit. Values are {s,S,b,l,B,L}.
     #[clap(short, long)]
-    encoding: Option<String>,
+    encoding: Option<EncodingKind>,
 
     /// Determine how to handle UTF-8 unicode characters.  The default  is no special treatment.
     /// All other versions of this option  only apply if the encoding is valid and enabling the
@@ -168,11 +126,11 @@ struct CliArgs {
     /// them as escape sequences and the 'highlight' option displays them as coloured escape
     /// sequences. Values are {default|show|invalid|hex|escape|highlight}.
     #[clap(short, long)]
-    unicode: Option<String>,
+    unicode: Option<UnicodeDisplayKind>,
 
     /// String used to separate parsed strings in output.  Default is newline.
-    #[clap(short='s', long="output-separator")]
-    output_separator: Option<String>
+    #[clap(short = 's', long = "output-separator")]
+    output_separator: Option<String>,
 }
 
 fn main() {

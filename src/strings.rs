@@ -1,12 +1,12 @@
+use super::utils::*;
+use object::{Object, ObjectSection, Section, SectionFlags};
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::File;
+use std::io::{BufReader, IsTerminal, Read, StdinLock, Write, stdin, stdout};
 use std::path::Path;
-use object::{Object, ObjectSection, Section, SectionFlags};
-use atty::Stream;
-use std::io::{Write, stdin, stdout, Read, BufReader, StdinLock};
-use super::utils::*;
+use std::str::FromStr;
 
 macro_rules! write_or_panic {
     ($dst:expr, $($arg:tt)*) => ({
@@ -16,7 +16,7 @@ macro_rules! write_or_panic {
 
 // region Options
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum UnicodeDisplayKind {
     Default,
     Show,
@@ -26,7 +26,26 @@ pub enum UnicodeDisplayKind {
     Invalid,
 }
 
-#[derive(Copy, Clone)]
+impl FromStr for UnicodeDisplayKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "default" | "d" => Ok(UnicodeDisplayKind::Default),
+            "locale" | "l" => Ok(UnicodeDisplayKind::Show),
+            "escape" | "e" => Ok(UnicodeDisplayKind::Escape),
+            "invalid" | "i" => Ok(UnicodeDisplayKind::Invalid),
+            "hex" | "x" => Ok(UnicodeDisplayKind::Hex),
+            "highlight" | "h" => Ok(UnicodeDisplayKind::Highlight),
+            other => Err(format!(
+                "invalid unicode argument '{}': expected one of default, locale, escape,\
+                 invalid, hex, highlight",
+                other
+            )),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 pub enum EncodingKind {
     Bit7,
     Bit8,
@@ -36,21 +55,56 @@ pub enum EncodingKind {
     LittleEndian32,
 }
 
-impl EncodingKind {
-    const fn num_bytes(&self) -> u8 {
-        return match self {
-            EncodingKind::Bit7 | EncodingKind::Bit8 => 1,
-            EncodingKind::BigEndian16 | EncodingKind::LittleEndian16 => 2,
-            EncodingKind::BigEndian32 | EncodingKind::LittleEndian32 => 4
-        };
+impl FromStr for EncodingKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "s" => Ok(EncodingKind::Bit7),
+            "S" => Ok(EncodingKind::Bit8),
+            "b" => Ok(EncodingKind::BigEndian16),
+            "l" => Ok(EncodingKind::LittleEndian16),
+            "B" => Ok(EncodingKind::BigEndian32),
+            "L" => Ok(EncodingKind::LittleEndian32),
+            other => Err(format!(
+                "invalid encoding '{}': expected one of s,S,b,l,B,L",
+                other
+            )),
+        }
     }
 }
 
-#[derive(Copy, Clone)]
+impl EncodingKind {
+    const fn num_bytes(&self) -> u8 {
+        match self {
+            EncodingKind::Bit7 | EncodingKind::Bit8 => 1,
+            EncodingKind::BigEndian16 | EncodingKind::LittleEndian16 => 2,
+            EncodingKind::BigEndian32 | EncodingKind::LittleEndian32 => 4,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 pub enum RadixKind {
     Oct,
     Dec,
     Hex,
+}
+
+impl FromStr for RadixKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "o" => Ok(RadixKind::Oct),
+            "d" => Ok(RadixKind::Dec),
+            "x" => Ok(RadixKind::Hex),
+            other => Err(format!(
+                "invalid radix argument '{}': expected one of o,d,x",
+                other
+            )),
+        }
+    }
 }
 
 pub struct Options {
@@ -95,7 +149,14 @@ const DATA_FLAGS: u64 = SEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS;
 
 trait DataSource {
     fn read_unicode(&mut self) -> Option<Vec<u8>>;
-    fn read_byte(&mut self) -> Option<u8>;
+
+    fn read_byte(&mut self) -> Option<u8> {
+        match self.read_symbol(&EncodingKind::Bit8) {
+            Some(x) => Some(x.0 as u8),
+            None => None,
+        }
+    }
+
     fn read_symbol(&mut self, encoding: &EncodingKind) -> Option<(u32, u8)>;
     fn seek_back(&mut self, num_bytes: u8);
 }
@@ -115,14 +176,7 @@ impl DataSource for ByteArrayHolder<'_> {
         let read = &self.inner[self.position..until];
         self.position = until;
 
-        return Some(read.to_vec());
-    }
-
-    fn read_byte(&mut self) -> Option<u8> {
-        return match self.read_symbol(&EncodingKind::Bit8) {
-            Some(x) => Some(x.0 as u8),
-            None => None
-        };
+        Some(read.to_vec())
     }
 
     fn read_symbol(&mut self, encoding: &EncodingKind) -> Option<(u32, u8)> {
@@ -160,7 +214,7 @@ impl DataSource for ByteArrayHolder<'_> {
 
         self.position += num_read as usize;
 
-        return Some((result, num_read));
+        Some((result, num_read))
     }
 
     fn seek_back(&mut self, num_bytes: u8) {
@@ -169,28 +223,28 @@ impl DataSource for ByteArrayHolder<'_> {
 }
 
 struct ReaderWithSeek<'a> {
-    inner: Box<(dyn Read + 'a)>,
+    inner: Box<dyn Read + 'a>,
     back_buf: VecDeque<u8>,
     back_pos: usize,
 }
 
-impl<'a> Into<ReaderWithSeek<'a>> for BufReader<File> {
-    fn into(self) -> ReaderWithSeek<'a> {
-        return ReaderWithSeek {
-            inner: Box::new(self),
+impl<'a> From<BufReader<File>> for ReaderWithSeek<'a> {
+    fn from(value: BufReader<File>) -> Self {
+        ReaderWithSeek {
+            inner: Box::new(value),
             back_buf: VecDeque::with_capacity(MAX_KEEP_BACK_SIZE),
             back_pos: 0,
-        };
+        }
     }
 }
 
-impl<'a> Into<ReaderWithSeek<'a>> for BufReader<StdinLock<'a>> {
-    fn into(self) -> ReaderWithSeek<'a> {
-        return ReaderWithSeek {
-            inner: Box::new(self),
+impl<'a> From<BufReader<StdinLock<'a>>> for ReaderWithSeek<'a> {
+    fn from(value: BufReader<StdinLock<'a>>) -> Self {
+        ReaderWithSeek {
+            inner: Box::new(value),
             back_buf: VecDeque::with_capacity(MAX_KEEP_BACK_SIZE),
             back_pos: 0,
-        };
+        }
     }
 }
 
@@ -229,14 +283,7 @@ impl DataSource for ReaderWithSeek<'_> {
             self.back_buf = self.back_buf.split_off(MAX_KEEP_BACK_SIZE / 2);
         }
 
-        return Some(vec);
-    }
-
-    fn read_byte(&mut self) -> Option<u8> {
-        return match self.read_symbol(&EncodingKind::Bit8) {
-            Some(x) => Some(x.0 as u8),
-            None => None
-        };
+        Some(vec)
     }
 
     fn read_symbol(&mut self, encoding: &EncodingKind) -> Option<(u32, u8)> {
@@ -251,9 +298,7 @@ impl DataSource for ReaderWithSeek<'_> {
                 self.back_pos -= 1;
             } else {
                 current = match self.inner.read_exact(&mut buf) {
-                    Ok(_) => {
-                        buf[0]
-                    }
+                    Ok(_) => buf[0],
                     Err(_) => {
                         break;
                     }
@@ -285,7 +330,7 @@ impl DataSource for ReaderWithSeek<'_> {
             }
         }
 
-        return Some((result, num_read));
+        Some((result, num_read))
     }
 
     fn seek_back(&mut self, num_bytes: u8) {
@@ -315,17 +360,23 @@ pub fn print_strings_for_file(file_path_str: &OsStr, options: &Options) -> bool 
         let stdout = stdout();
         let mut writer = stdout.lock();
 
-        let mut reader: ReaderWithSeek = BufReader::new(
-            File::open(file_path).expect("Couldn't open the file.")
-        ).into();
+        let mut reader: ReaderWithSeek =
+            BufReader::new(File::open(file_path).expect("Couldn't open the file.")).into();
 
-        print_strings(file_path_str.to_str().expect("Couldn't convert file path to string"),
-                      0, &mut reader, options, &mut writer);
+        print_strings(
+            file_path_str
+                .to_str()
+                .expect("Couldn't convert file path to string"),
+            0,
+            &mut reader,
+            options,
+            &mut writer,
+        );
 
-        writer.flush();
+        writer.flush().expect("cannot flush writer");
         return true;
     }
-    return true;
+    true
 }
 
 pub fn print_strings_for_stdin(options: &Options) {
@@ -334,30 +385,32 @@ pub fn print_strings_for_stdin(options: &Options) {
     let mut writer = stdout.lock();
     let mut reader: ReaderWithSeek = BufReader::new(stdin.lock()).into();
     print_strings("<stdin>", 0, &mut reader, options, &mut writer);
-    writer.flush();
+    writer.flush().expect("failed to flush stdin");
 }
 
 fn print_strings_for_object_file(file_path: &Path, options: &Options) -> bool {
-    return match std::fs::read(file_path) {
+    match std::fs::read(file_path) {
         Ok(data) => {
             if let Ok(object) = object::File::parse(&*data) {
                 let mut got_section = false;
                 for section in object.sections() {
-                    got_section |= print_strings_for_object_section(
-                        file_path.as_os_str(), &section, options,
-                    );
+                    got_section |=
+                        print_strings_for_object_section(file_path.as_os_str(), &section, options);
                 }
                 got_section
             } else {
-                println!("File is not an object");
+                eprintln!("File is not an object");
                 false
             }
         }
         Err(err) => {
-            println!("Warning: could not open '{:?}'.  reason: {}", file_path, err);
+            eprintln!(
+                "Warning: could not open '{:?}'.  reason: {}",
+                file_path, err
+            );
             false
         }
-    };
+    }
 }
 
 fn print_strings_for_object_section(
@@ -379,28 +432,23 @@ fn print_strings_for_object_section(
         print_strings(
             filename.to_str().unwrap(),
             section.address(),
-            &mut byte_holder, options,
+            &mut byte_holder,
+            options,
             &mut writer,
         );
-        writer.flush();
+        writer.flush().expect("failed to flush writer");
         return true;
     }
 
-    return false;
+    false
 }
 
 fn is_data_section(section: &Section) -> bool {
     let flags = match section.flags() {
-        SectionFlags::Elf { sh_flags } => {
-            sh_flags
-        }
-        SectionFlags::MachO { flags } => {
-            flags as u64
-        }
-        SectionFlags::Coff { characteristics } => {
-            characteristics as u64
-        }
-        _ => 0
+        SectionFlags::Elf { sh_flags } => sh_flags,
+        SectionFlags::MachO { flags } => flags as u64,
+        SectionFlags::Coff { characteristics } => characteristics as u64,
+        _ => 0,
     };
 
     if flags == 0 {
@@ -408,9 +456,9 @@ fn is_data_section(section: &Section) -> bool {
     }
 
     // TODO check here, use flags maybe? Elf() type? is it complete match?
-    return matches!(section.kind(), object::SectionKind::Metadata)
+    matches!(section.kind(), object::SectionKind::Metadata)
         || matches!(section.kind(), object::SectionKind::ReadOnlyData)
-        || matches!(section.kind(), object::SectionKind::Text);
+        || matches!(section.kind(), object::SectionKind::Text)
 }
 
 fn print_strings(
@@ -437,9 +485,9 @@ fn print_strings(
     loop {
         let mut current_address: u64;
 
-        if let Some(address) = find_matching_ascii_sequence(
-            search_start_address, data, &mut buffer, options,
-        ) {
+        if let Some(address) =
+            find_matching_ascii_sequence(search_start_address, data, &mut buffer, options)
+        {
             search_start_address = address;
             current_address = address + buffer.len() as u64;
         } else {
@@ -447,19 +495,23 @@ fn print_strings(
         }
 
         /* We found a run of `string_min' graphic characters.  Print up
-         to the next non-graphic character.  */
+        to the next non-graphic character.  */
         print_filename_and_address(filename, search_start_address, options, writer);
 
         // continue until we find non-valid char
         loop {
             let (character, read) = match data.read_symbol(&options.encoding) {
                 Some(x) => x,
-                None => break
+                None => break,
             };
             current_address += read as u64;
-            if character > 255 || !char_is_printable(character as u8 as char,
-                                                     options.encoding,
-                                                     options.include_all_whitespace) {
+            if character > 255
+                || !char_is_printable(
+                    character as u8 as char,
+                    options.encoding,
+                    options.include_all_whitespace,
+                )
+            {
                 current_address -= read as u64;
                 data.seek_back(read);
                 break;
@@ -473,7 +525,7 @@ fn print_strings(
             buffer.push('\n' as u8);
         }
 
-        std::io::copy(&mut buffer.as_slice(), writer);
+        std::io::copy(&mut buffer.as_slice(), writer).expect("failed to copy buffer");
         buffer.clear();
 
         search_start_address = current_address;
@@ -481,9 +533,9 @@ fn print_strings(
 }
 
 /*
- Finds an ASCII sequence which is matching the min length criteria. It will be written to
- the buffer and start address will be returned.
- */
+Finds an ASCII sequence which is matching the min length criteria. It will be written to
+the buffer and start address will be returned.
+*/
 fn find_matching_ascii_sequence(
     start_address: u64,
     data: &mut dyn DataSource,
@@ -509,11 +561,15 @@ fn find_matching_ascii_sequence(
             let (character, read) = data.read_symbol(&options.encoding)?;
             current_address += read as u64;
 
-            if character > 255 || !char_is_printable(character as u8 as char, options.encoding,
-                                                     options.include_all_whitespace) {
+            if character > 255
+                || !char_is_printable(
+                    character as u8 as char,
+                    options.encoding,
+                    options.include_all_whitespace,
+                )
+            {
                 /* Found a non-graphic.  Try again starting with next byte.  */
-                search_start_address =
-                    current_address - (options.encoding.num_bytes() as u64 - 1);
+                search_start_address = current_address - (options.encoding.num_bytes() as u64 - 1);
                 data.seek_back(read - 1);
                 should_retry = true;
                 break;
@@ -526,7 +582,7 @@ fn find_matching_ascii_sequence(
         }
     }
 
-    return Some(current_address - buffer.len() as u64);
+    Some(current_address - buffer.len() as u64)
 }
 
 /*
@@ -553,12 +609,9 @@ fn print_unicode_buffer(
     let mut current_address = address;
 
     loop {
-
-        let sequence_start_address_offset = match find_matching_unicode_sequence(
-            data, options
-        ) {
+        let sequence_start_address_offset = match find_matching_unicode_sequence(data, options) {
             Some(offset) => offset,
-            None => return
+            None => return,
         };
 
         print_filename_and_address(
@@ -569,12 +622,12 @@ fn print_unicode_buffer(
         );
 
         /* We have found string_min characters.  Display them and any
-       more that follow.  */
+        more that follow.  */
         let mut offset = sequence_start_address_offset;
         loop {
             let c = match data.read_byte() {
                 Some(x) => x,
-                None => return
+                None => return,
             };
 
             let mut char_len = 1;
@@ -588,7 +641,7 @@ fn print_unicode_buffer(
                 data.seek_back(1);
                 let maybe_utf8 = match data.read_unicode() {
                     Some(x) => x,
-                    None => return
+                    None => return,
                 };
                 if is_valid_utf8(&maybe_utf8) == 0 {
                     data.seek_back(maybe_utf8.len() as u8);
@@ -597,11 +650,7 @@ fn print_unicode_buffer(
                     data.seek_back(maybe_utf8.len() as u8);
                     break;
                 } else {
-                    char_len = display_utf8_char(
-                        &maybe_utf8,
-                        options.unicode_display,
-                        writer,
-                    );
+                    char_len = display_utf8_char(&maybe_utf8, options.unicode_display, writer);
                     if char_len != maybe_utf8.len() as u8 {
                         data.seek_back(maybe_utf8.len() as u8 - char_len);
                     }
@@ -620,15 +669,12 @@ fn print_unicode_buffer(
     }
 }
 
-fn find_matching_unicode_sequence(
-    data: &mut dyn DataSource,
-    options: &Options,
-) -> Option<usize> {
+fn find_matching_unicode_sequence(data: &mut dyn DataSource, options: &Options) -> Option<usize> {
     /* We must only display strings that are at least string_min *characters*
-   long.  So we scan the buffer in two stages.  First we locate the start
-   of a potential string.  Then we walk along it until we have found
-   string_min characters.  Then we go back to the start point and start
-   displaying characters according to the unicode_display setting.  */
+    long.  So we scan the buffer in two stages.  First we locate the start
+    of a potential string.  Then we walk along it until we have found
+    string_min characters.  Then we go back to the start point and start
+    displaying characters according to the unicode_display setting.  */
 
     let mut sequence_start_address_offset = 0usize;
     let mut address_offset = 0usize;
@@ -642,14 +688,14 @@ fn find_matching_unicode_sequence(
         /* Find the first potential character of a string.  */
         if !char_is_printable(c as char, options.encoding, options.include_all_whitespace) {
             num_found = 0;
-            address_offset += 1 as usize;
+            address_offset += 1usize;
             continue;
         }
 
         if c > 126 {
             if c < 0xc0 {
                 num_found = 0;
-                address_offset += 1 as usize;
+                address_offset += 1usize;
                 continue;
             }
 
@@ -687,7 +733,9 @@ fn find_matching_unicode_sequence(
 
         if num_found >= options.min_length {
             if char_len == 1 {
-                data.seek_back(address_offset as u8 + char_len - sequence_start_address_offset as u8);
+                data.seek_back(
+                    address_offset as u8 + char_len - sequence_start_address_offset as u8,
+                );
             } else {
                 // TODO fix that. We need to go back taking into account last read, and we
                 // don't know if it was unicode or not
@@ -732,12 +780,12 @@ fn display_utf8_char(buffer: &[u8], display: UnicodeDisplayKind, writer: &mut dy
     let utf8_len = match buffer[0] & 0x30 {
         0x00 | 0x10 => 2u8,
         0x20 => 3u8,
-        _ => 4u8
+        _ => 4u8,
     };
 
     match display {
         UnicodeDisplayKind::Escape | UnicodeDisplayKind::Highlight => {
-            if matches!(display, UnicodeDisplayKind::Highlight) && atty::is(Stream::Stdout) {
+            if matches!(display, UnicodeDisplayKind::Highlight) && stdout().is_terminal() {
                 write_or_panic!(writer, "\x1B[31;47m"); /* Red.  */
             }
             match utf8_len {
@@ -745,8 +793,9 @@ fn display_utf8_char(buffer: &[u8], display: UnicodeDisplayKind, writer: &mut dy
                     write_or_panic!(
                         writer,
                         "\\u{:02x}{:02x}",
-                        ((buffer[0] & 0x1c) >> 2),
-                        ((buffer[0] & 0x03) << 6) | (buffer[1] & 0x3f));
+                        (buffer[0] & 0x1c) >> 2,
+                        ((buffer[0] & 0x03) << 6) | (buffer[1] & 0x3f)
+                    );
                 }
 
                 3 => {
@@ -754,7 +803,8 @@ fn display_utf8_char(buffer: &[u8], display: UnicodeDisplayKind, writer: &mut dy
                         writer,
                         "\\u{:02x}{:02x}",
                         ((buffer[0] & 0x0f) << 4) | ((buffer[1] & 0x3c) >> 2),
-                        ((buffer[1] & 0x03) << 6) | ((buffer[2] & 0x3f)));
+                        ((buffer[1] & 0x03) << 6) | (buffer[2] & 0x3f)
+                    );
                 }
 
                 4 => {
@@ -763,14 +813,15 @@ fn display_utf8_char(buffer: &[u8], display: UnicodeDisplayKind, writer: &mut dy
                         "\\u{:02x}{:02x}{:02x}",
                         ((buffer[0] & 0x07) << 6) | ((buffer[1] & 0x3c) >> 2),
                         ((buffer[1] & 0x03) << 6) | ((buffer[2] & 0x3c) >> 2),
-                        ((buffer[2] & 0x03) << 6) | ((buffer[3] & 0x3f)));
+                        ((buffer[2] & 0x03) << 6) | (buffer[3] & 0x3f)
+                    );
                 }
                 _ => {
                     panic!("Unknown utf8_len")
                 }
             }
 
-            if matches!(display, UnicodeDisplayKind::Highlight) && atty::is(Stream::Stdout) {
+            if matches!(display, UnicodeDisplayKind::Highlight) && stdout().is_terminal() {
                 write_or_panic!(writer, "\033[0m"); /* Default colour.  */
             }
         }
@@ -790,7 +841,7 @@ fn display_utf8_char(buffer: &[u8], display: UnicodeDisplayKind, writer: &mut dy
         }
     }
 
-    return utf8_len;
+    utf8_len
 }
 
 #[cfg(test)]
@@ -804,7 +855,10 @@ mod tests {
         let mut output = Vec::new();
         display_utf8_char("¢".as_bytes(), UnicodeDisplayKind::Escape, &mut output);
 
-        assert_eq!("\\u00a2", String::from_utf8(output).expect("Not valid UTF8"))
+        assert_eq!(
+            "\\u00a2",
+            String::from_utf8(output).expect("Not valid UTF8")
+        )
     }
 
     #[test]
@@ -812,7 +866,10 @@ mod tests {
         let mut output = Vec::new();
         display_utf8_char("ह".as_bytes(), UnicodeDisplayKind::Escape, &mut output);
 
-        assert_eq!("\\u0939", String::from_utf8(output).expect("Not valid UTF8"))
+        assert_eq!(
+            "\\u0939",
+            String::from_utf8(output).expect("Not valid UTF8")
+        )
     }
 
     #[test]
@@ -821,7 +878,10 @@ mod tests {
         display_utf8_char("𐍈".as_bytes(), UnicodeDisplayKind::Escape, &mut output);
 
         // should be 10348, but strings.c produces the same
-        assert_eq!("\\u040348", String::from_utf8(output).expect("Not valid UTF8"))
+        assert_eq!(
+            "\\u040348",
+            String::from_utf8(output).expect("Not valid UTF8")
+        )
     }
 
     #[test]
@@ -829,7 +889,10 @@ mod tests {
         let mut output = Vec::new();
         display_utf8_char("𐍈".as_bytes(), UnicodeDisplayKind::Hex, &mut output);
 
-        assert_eq!("<0xf0908d88>", String::from_utf8(output).expect("Not valid UTF8"))
+        assert_eq!(
+            "<0xf0908d88>",
+            String::from_utf8(output).expect("Not valid UTF8")
+        )
     }
 
     #[test]
@@ -838,34 +901,40 @@ mod tests {
         display_utf8_char("𐍈".as_bytes(), UnicodeDisplayKind::Show, &mut output);
 
         // TODO recheck this
-        assert_eq!("[240, 144, 141, 136]", String::from_utf8(output).expect("Not valid UTF8"))
+        assert_eq!(
+            "[240, 144, 141, 136]",
+            String::from_utf8(output).expect("Not valid UTF8")
+        )
     }
 
     #[test]
     fn test_print_strings_default_params() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::new();
 
-        let expected = String::from_utf8(
-            std::fs::read("test-resources/default-output.txt").unwrap()
-        ).unwrap();
+        let expected =
+            String::from_utf8(std::fs::read("test-resources/default-output.txt").unwrap()).unwrap();
 
-        print_strings(TEST_OBJECT_FILE_PATH, 0, &mut data, &Options::default(), &mut output);
+        print_strings(
+            TEST_OBJECT_FILE_PATH,
+            0,
+            &mut data,
+            &Options::default(),
+            &mut output,
+        );
         assert_eq!(expected, String::from_utf8(output).unwrap())
     }
 
     #[test]
     fn test_print_strings_with_address_hex() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::new();
 
-        let expected = String::from_utf8(
-            std::fs::read("test-resources/output-with-address-hex.txt").unwrap()
-        ).unwrap();
+        let expected =
+            String::from_utf8(std::fs::read("test-resources/output-with-address-hex.txt").unwrap())
+                .unwrap();
 
         let mut options = Options::default();
         options.print_addresses = true;
@@ -877,14 +946,14 @@ mod tests {
 
     #[test]
     fn test_print_strings_with_address_octal() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::new();
 
         let expected = String::from_utf8(
-            std::fs::read("test-resources/output-with-address-octal.txt").unwrap()
-        ).unwrap();
+            std::fs::read("test-resources/output-with-address-octal.txt").unwrap(),
+        )
+        .unwrap();
 
         let mut options = Options::default();
         options.print_addresses = true;
@@ -896,14 +965,13 @@ mod tests {
 
     #[test]
     fn test_print_strings_with_separator() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::new();
 
-        let expected = String::from_utf8(
-            std::fs::read("test-resources/output-with-separator.txt").unwrap()
-        ).unwrap();
+        let expected =
+            String::from_utf8(std::fs::read("test-resources/output-with-separator.txt").unwrap())
+                .unwrap();
 
         let mut options = Options::default();
         options.output_separator = Some("\n\n".to_string());
@@ -914,14 +982,13 @@ mod tests {
 
     #[test]
     fn test_print_strings_num_bytes_8() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::new();
 
-        let expected = String::from_utf8(
-            std::fs::read("test-resources/output-with-num-bytes-8.txt").unwrap()
-        ).unwrap();
+        let expected =
+            String::from_utf8(std::fs::read("test-resources/output-with-num-bytes-8.txt").unwrap())
+                .unwrap();
 
         let mut options = Options::default();
         options.min_length = 8;
@@ -932,13 +999,11 @@ mod tests {
 
     #[test]
     fn test_print_strings_encoding_8_bits() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::<u8>::new();
 
-        let expected = std::fs::read("test-resources/output-with-encoding-8-bits.txt")
-            .unwrap();
+        let expected = std::fs::read("test-resources/output-with-encoding-8-bits.txt").unwrap();
 
         let mut options = Options::default();
         options.encoding = EncodingKind::Bit8;
@@ -949,14 +1014,13 @@ mod tests {
 
     #[test]
     fn test_print_strings_with_filenames() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::<u8>::new();
 
-        let expected = String::from_utf8(
-            std::fs::read("test-resources/output-with-filenames.txt").unwrap()
-        ).unwrap();
+        let expected =
+            String::from_utf8(std::fs::read("test-resources/output-with-filenames.txt").unwrap())
+                .unwrap();
 
         let mut options = Options::default();
         options.print_filenames = true;
@@ -967,14 +1031,14 @@ mod tests {
 
     #[test]
     fn test_print_strings_with_unicode_escape() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::<u8>::new();
 
         let expected = String::from_utf8(
-            std::fs::read("test-resources/output-with-unicode-escape.txt").unwrap()
-        ).unwrap();
+            std::fs::read("test-resources/output-with-unicode-escape.txt").unwrap(),
+        )
+        .unwrap();
 
         let mut options = Options::default();
         options.unicode_display = UnicodeDisplayKind::Escape;
@@ -986,14 +1050,14 @@ mod tests {
 
     #[test]
     fn test_print_strings_with_unicode_escape_and_address_hex() {
-        let mut data: ReaderWithSeek = BufReader::new(
-            File::open(TEST_OBJECT_FILE_PATH).unwrap()
-        ).into();
+        let mut data: ReaderWithSeek =
+            BufReader::new(File::open(TEST_OBJECT_FILE_PATH).unwrap()).into();
         let mut output = Vec::<u8>::new();
 
         let expected = String::from_utf8(
-            std::fs::read("test-resources/output-with-unicode-escape-address-hex.txt").unwrap()
-        ).unwrap();
+            std::fs::read("test-resources/output-with-unicode-escape-address-hex.txt").unwrap(),
+        )
+        .unwrap();
 
         let mut options = Options::default();
         options.unicode_display = UnicodeDisplayKind::Escape;

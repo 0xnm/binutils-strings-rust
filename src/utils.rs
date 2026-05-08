@@ -2,27 +2,27 @@ use super::strings::EncodingKind;
 
 pub(crate) fn char_is_printable(c: char, encoding: EncodingKind,
                                 include_all_whitespace: bool) -> bool {
-    return c >= '\x00' && c <= '\u{ff}' &&
+    c >= '\x00' && c <= '\u{ff}' &&
         (c == '\t' ||
             is_printable_ascii(c) ||
             (matches!(encoding, EncodingKind::Bit8) && c > '\x7f') ||
-            (include_all_whitespace && (c.is_ascii_whitespace() || c == '\x0b')));
+            (include_all_whitespace && (c.is_ascii_whitespace() || c == '\x0b')))
 }
 
 pub(crate) fn to_little_endian_32(symbol: u32) -> u32 {
-    return ((symbol & 0xff) << 24) | ((symbol & 0xff00) << 8) |
-        ((symbol & 0xff0000) >> 8) | ((symbol & 0xff000000) >> 24);
+    ((symbol & 0xff) << 24) | ((symbol & 0xff00) << 8) |
+        ((symbol & 0xff0000) >> 8) | ((symbol & 0xff000000) >> 24)
 }
 
 pub(crate) fn to_little_endian_16(symbol: u32) -> u32 {
-    return ((symbol & 0xff) << 8) | ((symbol & 0xff00) >> 8);
+    ((symbol & 0xff) << 8) | ((symbol & 0xff00) >> 8)
 }
 
 fn is_printable_ascii(c: char) -> bool {
-    return match c {
+    match c {
         '\x20'..='\x7e' => true,
         _ => false
-    };
+    }
 }
 
 /**
@@ -65,7 +65,7 @@ pub(crate) fn is_valid_utf8(buffer: &[u8]) -> u8 {
         return 0;
     }
 
-    return 4;
+    4
 }
 
 #[cfg(test)]
